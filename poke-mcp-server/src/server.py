@@ -23,55 +23,65 @@ mcp = FastMCP("RemembarMCP")
 @mcp.tool(description="Add a memory or note to Remembar. Use this when the user wants to remember something important like locations of items, appointments, or any information they want to store.")
 def add_memory(
     text: str,
-    priority: str = "med",
-    tags: Optional[list[str]] = None
+    session_id: str = "default"
 ) -> str:
     """
     Store a memory or note in the Remembar database.
     
     Parameters:
     - text (str): The memory or information to store
-    - priority (str): Priority level - 'low', 'med', or 'high' (default: 'med')
-    - tags (list[str], optional): List of tags to categorize the memory
+    - session_id (str): Session identifier (default: 'default')
     
     Returns:
-    - str: Confirmation message with note ID
+    - str: Confirmation message with storage details
     """
     try:
-        # Validate priority
-        if priority not in ["low", "med", "high"]:
-            priority = "med"
-        
-        # Prepare request payload matching ChromaDB /add_note schema
+        # Prepare request payload matching ChromaDB /store_text schema
         payload = {
-            "tenant_id": TENANT_ID,
-            "text": text,
-            "modality": "typed",
-            "priority": priority,
-            "tags": tags if tags else [],
-            "linked_entity": None
+            "text_summary": text,
+            "session_id": session_id
         }
         
-        # Call ChromaDB /add_note endpoint
+        # Call ChromaDB /store_text endpoint
         response = requests.post(
-            f"{CHROMADB_URL}/add_note",
+            f"{CHROMADB_URL}/store_text",
             json=payload,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "ngrok-skip-browser-warning": "true"
+            },
             timeout=10
         )
         
         if response.status_code == 200:
             data = response.json()
             if data.get("ok"):
-                note_id = data.get("note_id", "unknown")
-                return f"✓ Memory saved successfully! (ID: {note_id})\n\nI'll remember: {text}"
+                # Extract analysis details
+                analysis = data.get("analysis", {})
+                scene = analysis.get("scene", "No scene description")
+                objects = analysis.get("objects", [])
+                
+                result = f"✓ Memory saved successfully!\n\n"
+                result += f"📝 Scene: {scene}\n"
+                
+                if objects:
+                    result += f"\n🎯 Detected {len(objects)} object(s):\n"
+                    for obj in objects[:5]:  # Show first 5 objects
+                        label = obj.get("label", "unknown")
+                        color = obj.get("color")
+                        if color and color != "null":
+                            result += f"  • {label} ({color})\n"
+                        else:
+                            result += f"  • {label}\n"
+                
+                return result
             else:
                 return "Failed to save memory. Please try again."
         else:
             return f"Error connecting to memory database. Status: {response.status_code}"
             
     except requests.exceptions.RequestException as e:
-        return f"Network error: Unable to reach memory database. Please check your connection."
+        return "Network error: Unable to reach memory database. Please check your connection."
     except Exception as e:
         return f"Error saving memory: {str(e)}"
 
@@ -79,64 +89,55 @@ def add_memory(
 @mcp.tool(description="Search for memories and information in Remembar. Use this when the user asks questions like 'where are my keys?', 'when did I...?', or wants to recall any stored information.")
 def search_memory(
     query: str,
-    n_results: int = 5
+    session_id: Optional[str] = None
 ) -> str:
     """
     Search for memories and information using natural language.
     
     Parameters:
     - query (str): Natural language question or search term
-    - n_results (int): Number of results to return (default: 5)
+    - session_id (str, optional): Filter by session ID
     
     Returns:
-    - str: Formatted search results with relevant memories
+    - str: Natural language answer with relevant memories
     """
     try:
-        # Prepare request payload matching ChromaDB /search_semantic schema
-        payload = {
-            "tenant_id": TENANT_ID,
-            "query_text": query,
-            "collections": ["entities_stream_v1", "user_notes_v1"],
-            "n_results": min(n_results, 10)  # Cap at 10 results
-        }
+        # Build query URL for GET /search endpoint
+        url = f"{CHROMADB_URL}/search?query={requests.utils.quote(query)}"
+        if session_id:
+            url += f"&session_id={requests.utils.quote(session_id)}"
         
-        # Call ChromaDB /search_semantic endpoint
-        response = requests.post(
-            f"{CHROMADB_URL}/search_semantic",
-            json=payload,
-            headers={"Content-Type": "application/json"},
+        # Call ChromaDB /search endpoint
+        response = requests.get(
+            url,
+            headers={"ngrok-skip-browser-warning": "true"},
             timeout=10
         )
         
         if response.status_code == 200:
             data = response.json()
             if data.get("ok"):
-                results = data.get("results", [])
+                answer = data.get("answer", "")
+                mode = data.get("mode", "")
+                matches = data.get("matches", 0)
+                tracked_item = data.get("tracked_item")
                 
-                if not results:
+                if not answer:
                     return f"I couldn't find any memories matching '{query}'. Try rephrasing or add this as a new memory!"
                 
-                # Format results for messaging interface
-                response_text = f"Found {len(results)} relevant memories:\n\n"
+                # Format natural language response
+                result = f"🤖 {answer}\n"
                 
-                for i, result in enumerate(results[:5], 1):
-                    doc = result.get("document", "")
-                    distance = result.get("distance", 0)
-                    
-                    # Show most relevant results (lower distance = more relevant)
-                    confidence = "🔥" if distance < 0.5 else "✓"
-                    response_text += f"{confidence} {doc}\n"
-                    
-                    # Add context from metadata if available
-                    metadata = result.get("metadata", {})
-                    if "frame_ts" in metadata:
-                        response_text += "   (from visual memory)\n"
-                    elif "note_id" in metadata:
-                        response_text += "   (from your notes)\n"
-                    
-                    response_text += "\n"
+                if matches > 0:
+                    result += f"\n📊 Found {matches} relevant memories"
+                    if mode:
+                        result += f" (mode: {mode})"
+                    result += "\n"
                 
-                return response_text.strip()
+                if tracked_item:
+                    result += f"\n📌 Tracked item: {tracked_item}\n"
+                
+                return result.strip()
             else:
                 return "Failed to search memories. Please try again."
         else:
@@ -159,7 +160,8 @@ def get_server_info() -> dict:
     try:
         # Check ChromaDB health
         health_response = requests.get(
-            f"{CHROMADB_URL}/healthz",
+            f"{CHROMADB_URL}/",
+            headers={"ngrok-skip-browser-warning": "true"},
             timeout=5
         )
         chromadb_status = "connected" if health_response.status_code == 200 else "disconnected"
